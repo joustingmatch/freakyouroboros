@@ -1,35 +1,7 @@
---[[
-    Arena Auto Farm — Fluent Renewed UI
-    Loads on ANY place: the UI always opens; the combat/farm features below
-    activate only when the Arena (place 98927955463992) remotes are present.
-
-    Built from static analysis + live verification against the running place:
-      - ReplicatedStorage.GameStateRemotes.{GameOverStarted, GameOverEnded, VotePlayAgain}
-      - ReplicatedStorage.WaveRemotes.{SkipVote, SkipUpdate}
-      - ReplicatedStorage.UpgradeRemotes.{PurchaseHealthUpgrade, PurchaseWeaponUpgrade}
-      - ReplicatedStorage.GearRemotes.GearPurchase(gearName)
-      - ReplicatedStorage.GunRemotes.GunHit(gunName, zombieId, position)   -- kill aura
-      - ReplicatedStorage.Data.GearData                                    -- gear list / cooldowns
-
-    IMPORTANT: the game's controllers (ZombieClient, GunClient, SettingsClient,
-    CrosshairController, ...) register themselves with _G inside the game's script
-    environment. An executor runs in a SEPARATE global table, so _G.ZombieClient et al.
-    are nil from here. The live singletons are reached instead through
-    ReplicatedStorage.Modules.ServiceRegistry:Get(name) (verified working in-game).
-
-    Server validates affordability/level caps on every remote, so firing these on a
-    timer when not affordable/maxed is a no-op server-side - no client-side bookkeeping needed.
-]]
-
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 
--- This script is loadable on ANY place. Every game-specific lookup below uses
--- FindFirstChild (instant, nil when absent) instead of a blocking WaitForChild,
--- so on a non-Arena place the UI (and Discord button) still loads immediately
--- and the Arena features simply stay dormant. In Arena these objects are
--- already replicated by the time you execute, so FindFirstChild resolves them.
 local function findIn(parent, ...)
     local node = parent
     for _, name in ipairs({ ... }) do
@@ -39,8 +11,6 @@ local function findIn(parent, ...)
     return node
 end
 
--- The game's service registry holds the live controller singletons (_G is
--- not shared with the executor environment, so we must go through this).
 local ServiceRegistry
 do
     local sr = findIn(ReplicatedStorage, "Modules", "ServiceRegistry")
@@ -60,9 +30,6 @@ local function getService(name, timeout)
     return ok and svc or nil
 end
 
--- NOTE: no second `true` arg here. Some executors (incl. this one) type the
--- 2nd HttpGet/HttpGetAsync param as HttpRequestType and throw
--- "Unable to cast bool to HttpRequestType" when given a boolean.
 local httpGet = game.HttpGet or game.HttpGetAsync
 local function fetch(url)
     return httpGet(game, url)
@@ -71,10 +38,6 @@ end
 local Library = loadstring(fetch("https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"))()
 local SaveManager = loadstring(fetch("https://raw.githubusercontent.com/ActualMasterOogway/Fluent-Renewed/master/Addons/SaveManager.luau"))()
 local InterfaceManager = loadstring(fetch("https://raw.githubusercontent.com/ActualMasterOogway/Fluent-Renewed/master/Addons/InterfaceManager.luau"))()
-
-----------------------------------------------------------------------
--- Game hooks
-----------------------------------------------------------------------
 
 local GameStateRemotes = ReplicatedStorage:FindFirstChild("GameStateRemotes")
 local WaveRemotes = ReplicatedStorage:FindFirstChild("WaveRemotes")
@@ -95,10 +58,6 @@ local function fireRemote(remote, ...)
         pcall(function(...) remote:FireServer(...) end, ...)
     end
 end
-
-----------------------------------------------------------------------
--- Auto Replay
-----------------------------------------------------------------------
 
 local AutoReplayEnabled = false
 local hasVotedReplay = false
@@ -125,11 +84,6 @@ if GameStateRemotes then
         end)
     end
 end
-
-----------------------------------------------------------------------
--- Auto Next Wave (uses the game's own AutoVote setting; falls back to
--- firing SkipVote directly if SettingsClient isn't registered yet)
-----------------------------------------------------------------------
 
 local AutoNextWaveEnabled = false
 
@@ -159,15 +113,6 @@ task.spawn(function()
     end
 end)
 
-----------------------------------------------------------------------
--- Auto Skip Wave
---
--- Distinct from Auto Next Wave (which flips the game's persistent AutoVote
--- setting): this actively casts a skip vote (WaveRemotes.SkipVote:FireServer
--- (true)) the moment the skip button becomes available each wave, and keeps
--- the vote asserted. Verified remote: WaveRemotes.SkipVote.
-----------------------------------------------------------------------
-
 local AutoSkipWaveEnabled = false
 
 task.spawn(function()
@@ -175,7 +120,6 @@ task.spawn(function()
     local SkipUpdate = WaveRemotes and WaveRemotes:FindFirstChild("SkipUpdate")
     if not SkipVote then return end
 
-    -- Re-vote as soon as the server says the skip button is available.
     if SkipUpdate then
         SkipUpdate.OnClientEvent:Connect(function(data)
             if AutoSkipWaveEnabled and data
@@ -185,7 +129,6 @@ task.spawn(function()
         end)
     end
 
-    -- Safety net: keep the vote asserted while enabled.
     while true do
         if AutoSkipWaveEnabled then
             fireRemote(SkipVote, true)
@@ -193,14 +136,6 @@ task.spawn(function()
         task.wait(2)
     end
 end)
-
-----------------------------------------------------------------------
--- Auto Equip Weapon
---
--- The game unequips your gun on respawn / state changes. This re-equips
--- the first available Tool (character first, then backpack) via the
--- Humanoid. Verified in-game: Humanoid:EquipTool re-equips reliably.
-----------------------------------------------------------------------
 
 local AutoEquipWeaponEnabled = false
 
@@ -221,15 +156,6 @@ task.spawn(function()
     end
 end)
 
-----------------------------------------------------------------------
--- Hide Built In Crosshair
---
--- The CrosshairController toggles its child ImageLabel's .Visible based on
--- aim state, so calling :Hide() loses a race against the game. Instead we
--- disable the whole CrosshairGui ScreenGui, which the controller never
--- touches after Initialize - so it stays hidden regardless of aim state.
-----------------------------------------------------------------------
-
 local HideCrosshairEnabled = false
 
 task.spawn(function()
@@ -245,10 +171,6 @@ task.spawn(function()
         task.wait(0.25)
     end
 end)
-
-----------------------------------------------------------------------
--- Auto Upgrade Health / Weapon
-----------------------------------------------------------------------
 
 local AutoUpgradeHealthEnabled = false
 local AutoUpgradeWeaponEnabled = false
@@ -267,12 +189,8 @@ task.spawn(function()
     end
 end)
 
-----------------------------------------------------------------------
--- Auto Use Gear (selectable)
-----------------------------------------------------------------------
-
 local AutoUseGearEnabled = false
-local SelectedGearNames = {} -- internal gear keys, set by the dropdown
+local SelectedGearNames = {}
 local GearPurchase = GearRemotes and GearRemotes:FindFirstChild("GearPurchase")
 
 local GearDisplayToKey = {}
@@ -315,28 +233,8 @@ task.spawn(function()
     end
 end)
 
-----------------------------------------------------------------------
--- Kill Aura
---
--- Reuses the game's own damage pipeline: for every zombie within range it
--- fires GunHit(GunName, ZombieId, ZombiePosition) - the exact call the
--- bullet code makes on a normal hit (see GunClient HandleHit). The server
--- resolves damage from the gun, so we just deliver hits. Verified in-game:
--- a zombie dropped from 60 HP to dead after firing GunHit("Pistol", id, pos).
---
--- Gun name resolution: GunClient.EquippedGun is frequently nil (it only
--- tracks guns equipped through the normal flow), so we fall back to the
--- Tool currently in the character, then the backpack, then "Pistol".
-----------------------------------------------------------------------
-
 local KillAuraEnabled = false
 local KillAuraRadius = 60
-
--- Fast fixed tick + batch of lowest-HP targets per tick. Measured in-game:
--- the old "1 shot per gun fire-interval" design killed ~1 zombie / 2s, while
--- this batched approach killed ~45 / 2s on the same crowd. The server accepts
--- far more than a single gun's fire rate, so we tick fast and spread fresh-
--- position hits across the nearest-to-dead zombies to maximise kills.
 local KILL_AURA_TICK = 0.03
 local KILL_AURA_MAX_TARGETS = 18
 
@@ -377,10 +275,6 @@ local function isAlive(rec)
     return rec and not rec.IsDying and (rec.Health == nil or rec.Health > 0)
 end
 
--- Collect alive zombies in range, lowest current HP first (most likely to die
--- this tick -> secures kills, minimises overkill), capped at `maxTargets`.
--- Each entry carries a freshly-read position so the server's position check
--- passes. Returns an array of { id, pos }.
 local function collectTargets(ZombieClient, root, radius, maxTargets)
     local ok, ids = pcall(function()
         return ZombieClient:GetNearbyZombieIds(root.Position, radius)
@@ -426,23 +320,11 @@ task.spawn(function()
     end
 end)
 
-----------------------------------------------------------------------
--- Rapid Fire
---
--- GunClient.CheckFireRate gates each shot with `EquippedConfig.FireRate >
--- now - LastFireTime`, reading FireRate live every shot. Overriding that
--- field to a tiny value removes the client cooldown so the gun fires as fast
--- as you can hold the trigger (verified: it lifts the per-shot gate). We
--- remember the gun's real FireRate per config table and restore it on toggle
--- off / gun switch, so upgrades aren't clobbered.
-----------------------------------------------------------------------
-
 local RapidFireEnabled = false
 local RapidFireInterval = 0.02
 
 task.spawn(function()
     local GunClient = getService("GunClient", 30)
-    -- weak keys: config table -> its real FireRate (lets old tables be GC'd)
     local originalRate = setmetatable({}, { __mode = "k" })
     while true do
         local cfg = GunClient and GunClient.EquippedConfig
@@ -462,10 +344,6 @@ task.spawn(function()
         task.wait(0.1)
     end
 end)
-
-----------------------------------------------------------------------
--- UI
-----------------------------------------------------------------------
 
 local Window = Library:CreateWindow{
     Title = `Arena Auto Farm {Library.Version}`,
@@ -487,9 +365,6 @@ local Tabs = {
 
 local Options = Library.Options
 
--- Discord button pinned to the top of every tab. Added before any other
--- element so it always renders first. Clicking copies the invite to the
--- clipboard (executors expose setclipboard under a few different names).
 local DISCORD_INVITE = "https://discord.gg/f3dJhDgyTq"
 local copyToClipboard = setclipboard or toclipboard or set_clipboard or (writeclipboard)
 
